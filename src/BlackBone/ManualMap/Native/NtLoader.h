@@ -9,7 +9,6 @@
 
 namespace blackbone
 {
-
 enum LdrRefFlags
 {
     Ldr_None      = 0x00,   // Do not create any reference
@@ -34,7 +33,6 @@ class NtLdr
 {
 public:
     BLACKBONE_API NtLdr( class Process& proc );
-    BLACKBONE_API ~NtLdr( void );
 
     /// <summary>
     /// Initialize some loader stuff
@@ -57,7 +55,7 @@ public:
     /// <param name="mod">Module data</param>
     /// <param name="tlsPtr">TLS directory of target image</param>
     /// <returns>Status code</returns>
-    BLACKBONE_API NTSTATUS AddStaticTLSEntry( const NtLdrEntry& mod, ptr_t tlsPtr );
+    BLACKBONE_API NTSTATUS AddStaticTLSEntry( NtLdrEntry& mod, ptr_t tlsPtr );
 
     /// <summary>
     /// Create module record in LdrpInvertedFunctionTable
@@ -68,11 +66,20 @@ public:
     BLACKBONE_API bool InsertInvertedFunctionTable( NtLdrEntry& mod );
 
     /// <summary>
+    /// Free static TLS
+    /// </summary>
+    /// <param name="mod">Target module</param>
+    /// <param name="noThread">Don't create new threads during remote call</param>
+    /// <returns>Status code</returns>
+    BLACKBONE_API NTSTATUS UnloadTLS( const NtLdrEntry& mod, bool noThread = false );
+
+    /// <summary>
     /// Unlink module from Ntdll loader
     /// </summary>
     /// <param name="mod">Module data</param>
+    /// <param name="noThread">Don't create new threads during unlink</param>
     /// <returns>true on success</returns>
-    BLACKBONE_API bool Unlink( const ModuleData& mod );    
+    BLACKBONE_API bool Unlink( const ModuleData& mod, bool noThread = false );
 private:
 
     /// <summary>
@@ -155,7 +162,7 @@ private:
     /// <summary>
     /// Hash image name
     /// </summary>
-    /// <param name="str">Iamge name</param>
+    /// <param name="str">Image name</param>
     /// <returns>Hash</returns>
     ULONG HashString( const std::wstring& str );
 
@@ -173,27 +180,25 @@ private:
     /// <param name="ptr">node pointer (if nullptr - new dummy node is allocated)</param>
     /// <param name="pModule">Module base address</param>
     /// <returns>Node address</returns>
-    template<typename T, typename PApiSetEntry>
-    ptr_t SetNode( ptr_t ptr, PApiSetEntry pModule );
+    template<typename T, typename Module>
+    ptr_t SetNode( ptr_t ptr, Module pModule );
 
     /// <summary>
     /// Unlink module from PEB_LDR_DATA
     /// </summary>
     /// <param name="mod">Module data</param>
     /// <returns>Address of removed record</returns>
-    template<typename T> 
+    template<typename T>
     ptr_t UnlinkFromLdr( const ModuleData& mod );
 
     /// <summary>
-    /// Remove record from LIST_ENTRY structure
+    /// Finds LDR entry for module
     /// </summary>
-    /// <param name="pListEntry">List to remove from</param>
-    /// <param name="head">List head address.</param>
-    /// <param name="ofst">Offset of link in _LDR_DATA_TABLE_ENTRY_BASE struct</param>
-    /// <param name="baseAddress">Record to remove.</param>
-    /// <returns>Address of removed record</returns>
-    template<typename T> 
-    ptr_t UnlinkListEntry( _LIST_ENTRY_T<T> pListEntry, ptr_t head, uintptr_t ofst, ptr_t baseAddress );
+    /// <param name="moduleBase">Target module base</param>
+    /// <param name="found">Found entry</param>
+    /// <returns>Found LDR entry address</returns>
+    template<typename T>
+    ptr_t FindLdrEntry( module_t moduleBase, _LDR_DATA_TABLE_ENTRY_BASE_T<T>* found = nullptr );
 
     /// <summary>
     ///  Remove record from LIST_ENTRY structure
@@ -207,12 +212,13 @@ private:
     /// </summary>
     /// <param name="mod">Module data</param>
     /// <param name="ldrEntry">Module LDR entry</param>
+    /// <param name="noThread">Don't create new threads during unlink</param>
     /// <returns>Address of removed record</returns>
     template<typename T>
-    ptr_t UnlinkTreeNode( const ModuleData& mod, ptr_t ldrEntry );
+    ptr_t UnlinkTreeNode( const ModuleData& mod, ptr_t ldrEntry, bool noThread = false );
 
     NtLdr( const NtLdr& ) = delete;
-    NtLdr& operator =(const NtLdr&) = delete;
+    NtLdr& operator =( const NtLdr& ) = delete;
 
 private:
     class Process& _process;                // Process memory routines
@@ -224,6 +230,4 @@ private:
     eModType _initializedFor = mt_unknown;  // Loader initialization target
     std::map<ptr_t, ptr_t> _nodeMap;        // Allocated native structures
 };
-
 }
-

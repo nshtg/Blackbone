@@ -2,7 +2,7 @@
 #include "../Process/Process.h"
 #include "../Include/Macro.h"
 #include "../Misc/Trace.hpp"
-#include "../Misc/PatternLoader.h"
+#include "../Symbols/SymbolData.h"
 #include "../Asm/LDasm.h"
 
 namespace blackbone
@@ -224,7 +224,7 @@ NTSTATUS MExcept::CreateVEH( Process& proc, ModuleData& mod, bool partial )
             _pModTable = std::move( mem.result() );
         }
 
-        ModuleTable table;
+        ModuleTable table = { };
         _pModTable.Read ( 0, table );
 
         // Add new entry to the table
@@ -246,7 +246,7 @@ NTSTATUS MExcept::CreateVEH( Process& proc, ModuleData& mod, bool partial )
 
     _pVEHCode = std::move( mem.result() );
 
-    BLACKBONE_TRACE( "ManualMap: Vectored hander: 0x%p\n", _pVEHCode.ptr() );
+    BLACKBONE_TRACE( "ManualMap: Vectored hander: 0x%p", _pVEHCode.ptr() );
 
     auto replaceStub = []( uint8_t* ptr, size_t size, auto oldVal, auto newVal )
     {
@@ -284,11 +284,9 @@ NTSTATUS MExcept::CreateVEH( Process& proc, ModuleData& mod, bool partial )
         if (!pDecode)
             return pDecode.status;
 
-        auto& data = g_PatternLoader->data();
-
-        replaceStub( newHandler, handlerSize, 0xDEADDA7A, static_cast<uint32_t>(data.LdrpInvertedFunctionTable32) );
+        replaceStub( newHandler, handlerSize, 0xDEADDA7A, static_cast<uint32_t>(g_symbols.LdrpInvertedFunctionTable32) );
         replaceStub( newHandler, handlerSize, 0xDEADC0DE, static_cast<uint32_t>(pDecode->procAddress) );
-        replaceStub( newHandler, handlerSize, 0xDEADC0D2, static_cast<uint32_t>(data.LdrProtectMrdata) );
+        replaceStub( newHandler, handlerSize, 0xDEADC0D2, static_cast<uint32_t>(g_symbols.LdrProtectMrdata) );
     }
 
     // Write handler data into target process
@@ -328,7 +326,7 @@ NTSTATUS MExcept::CreateVEH( Process& proc, ModuleData& mod, bool partial )
 /// </summary>
 /// <param name="proc">Target process</param>
 /// <param name="partial">Partial exception support</param>
-/// <param name="mt">Mosule type</param>
+/// <param name="mt">Module type</param>
 /// <returns>Status code</returns>
 NTSTATUS MExcept::RemoveVEH( Process& proc, bool partial, eModType mt )
 {  

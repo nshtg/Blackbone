@@ -138,9 +138,9 @@ std::wstring Utils::GetExeDirectory()
 /// <returns>Generated string</returns>
 std::wstring Utils::RandomANString( int length /*= 0*/ )
 {
-    static const wchar_t alphabet[] = L"ABCDEFGHIJKLMNOPQRSTUVWXYZbcdefghijklmnopqrstuvwxyz1234567890";
+    static constexpr wchar_t alphabet[] = L"ABCDEFGHIJKLMNOPQRSTUVWXYZbcdefghijklmnopqrstuvwxyz1234567890";
     static std::random_device rd;
-    static std::uniform_int_distribution<> dist( 0, ARRAYSIZE(alphabet) - 2 );
+    static std::uniform_int_distribution<> dist( 0, _countof( alphabet ) - 2 );
     static std::uniform_int_distribution<> dist_len( 5, 15 );
     std::wstring result;
 

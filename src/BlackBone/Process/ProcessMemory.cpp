@@ -74,7 +74,11 @@ NTSTATUS ProcessMemory::Protect( ptr_t pAddr, size_t size, DWORD flProtect, DWOR
     if (pOld == nullptr)
         pOld = &junk;
 
-    return _core.native()->VirtualProtectExT( pAddr, size, CastProtection( flProtect, _core.DEP() ), pOld );
+    DWORD finalProt = flProtect;
+    if (_casting == MemProtectionCasting::useDep)
+        finalProt = CastProtection( flProtect, _core.DEP() );
+
+    return _core.native()->VirtualProtectExT( pAddr, size, finalProt, pOld );
 }
 
 /// <summary>
@@ -141,7 +145,7 @@ NTSTATUS ProcessMemory::Read( ptr_t dwAddress, size_t dwSize, PVOID pResult, boo
 /// Otherwise function will fail if there is at least one non-committed page in region.
 /// </param>
 /// <returns>Status</returns>
-NTSTATUS ProcessMemory::Read( std::vector<ptr_t>&& adrList, size_t dwSize, PVOID pResult, bool handleHoles /*= false */ )
+NTSTATUS ProcessMemory::Read( const std::vector<ptr_t>& adrList, size_t dwSize, PVOID pResult, bool handleHoles /*= false */ )
 {
     if (adrList.empty())
         return STATUS_INVALID_PARAMETER;
@@ -176,7 +180,7 @@ NTSTATUS ProcessMemory::Write( ptr_t pAddress, size_t dwSize, const void* pData 
 /// <param name="dwSize">Size of data to write</param>
 /// <param name="pData">Buffer to write</param>
 /// <returns>Status</returns>
-NTSTATUS ProcessMemory::Write( std::vector<ptr_t>&& adrList, size_t dwSize, const void* pData )
+NTSTATUS ProcessMemory::Write( const std::vector<ptr_t>& adrList, size_t dwSize, const void* pData )
 {
     if (adrList.empty())
         return STATUS_INVALID_PARAMETER;

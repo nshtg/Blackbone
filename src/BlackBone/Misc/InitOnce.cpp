@@ -2,10 +2,10 @@
 #include "../Include/Winheaders.h"
 #include "../Include/Macro.h"
 #include "../Include/HandleGuard.h"
-#include "../../../contrib/VersionHelpers.h"
+#include <3rd_party/VersionApi.h>
 
 #include "DynImport.h"
-#include "PatternLoader.h"
+#include "../Symbols/SymbolLoader.h"
 #include "NameResolve.h"
 
 #include <string>
@@ -25,7 +25,7 @@ public:
 
     static bool Exec()
     {
-        if(!_done)
+        if (!_InterlockedCompareExchange( &_done, TRUE, FALSE ))
         {
             InitVersion();
 
@@ -33,15 +33,13 @@ public:
             GrantPriviledge( L"SeLoadDriverPrivilege" );
             LoadFuncs();
 
-            g_PatternLoader = std::make_unique<PatternLoader>();
-            g_PatternLoader->DoSearch();
+            SymbolLoader sl;
+            sl.Load( g_symbols );
 
             NameResolve::Instance().Initialize();
-
-            _done = true;
         }
 
-        return _done;
+        return true;
     }  
 
     /// <summary>
@@ -120,10 +118,8 @@ public:
     }
 
 private:
-    static bool _done;
+    static volatile long _done;
 };
-
-std::unique_ptr<PatternLoader> g_PatternLoader;
 
 /// <summary>
 /// Exported InitOnce wrapper
@@ -135,5 +131,5 @@ bool InitializeOnce()
     return InitOnce::Exec();
 }
 
-bool InitOnce::_done = false;
+volatile long InitOnce::_done = 0;
 }

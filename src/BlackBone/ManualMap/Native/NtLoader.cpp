@@ -4,19 +4,15 @@
 #include "../../Misc/Utils.h"
 #include "../../Misc/DynImport.h"
 #include "../../Misc/trace.hpp"
-#include "../../Misc/PatternLoader.h"
+#include "../../Symbols/SymbolData.h"
 
-#include "../contrib/VersionHelpers.h"
+#include <3rd_party/VersionApi.h>
 
 namespace blackbone
 {
 
 NtLdr::NtLdr( Process& proc )
     : _process( proc )
-{
-}
-
-NtLdr::~NtLdr(void)
 {
 }
 
@@ -132,8 +128,8 @@ bool NtLdr::CreateNTReference( NtLdrEntry& mod )
 /// <param name="ptr">node pointer (if nullptr - new dummy node is allocated)</param>
 /// <param name="pModule">Module base address</param>
 /// <returns>Node address</returns>
-template<typename T, typename PApiSetEntry> 
-ptr_t NtLdr::SetNode( ptr_t ptr, PApiSetEntry pModule )
+template<typename T, typename Module> 
+ptr_t NtLdr::SetNode( ptr_t ptr, Module pModule )
 {
     if(ptr == 0)
     {
@@ -154,7 +150,7 @@ ptr_t NtLdr::SetNode( ptr_t ptr, PApiSetEntry pModule )
 /// <param name="mod">Module data</param>
 /// <param name="tlsPtr">TLS directory of target image</param>
 /// <returns>Status code</returns>
-NTSTATUS NtLdr::AddStaticTLSEntry( const NtLdrEntry& mod, ptr_t tlsPtr )
+NTSTATUS NtLdr::AddStaticTLSEntry( NtLdrEntry& mod, ptr_t tlsPtr )
 {
     bool wxp = IsWindowsXPOrGreater() && !IsWindowsVistaOrGreater();
     ptr_t pNode = _nodeMap.count( mod.baseAddress ) ? _nodeMap[mod.baseAddress] : 0;
@@ -163,17 +159,21 @@ NTSTATUS NtLdr::AddStaticTLSEntry( const NtLdrEntry& mod, ptr_t tlsPtr )
     ptr_t LdrpHandleTlsData = 0;
     if (mod.type == mt_mod64)
     {
-        LdrpHandleTlsData = g_PatternLoader->data().LdrpHandleTlsData64;
+        LdrpHandleTlsData = g_symbols.LdrpHandleTlsData64;
         pNode = SetNode<_LDR_DATA_TABLE_ENTRY_BASE64>( pNode, mod.baseAddress );
     }
     else
     {
-        LdrpHandleTlsData = g_PatternLoader->data().LdrpHandleTlsData32;
+        LdrpHandleTlsData = g_symbols.LdrpHandleTlsData32;
         pNode = SetNode<_LDR_DATA_TABLE_ENTRY_BASE32>( pNode, mod.baseAddress );
     }
 
     if (pNode == 0)
         return STATUS_NO_MEMORY;
+
+    // Update ptr
+    if (mod.ldrPtr == 0)
+        mod.ldrPtr = pNode;
 
     // Manually add TLS table
     if (wxp && tlsPtr != 0)
@@ -231,12 +231,12 @@ NTSTATUS NtLdr::AddStaticTLSEntry( const NtLdrEntry& mod, ptr_t tlsPtr )
 /// <returns>true on success</returns>
 bool NtLdr::InsertInvertedFunctionTable( NtLdrEntry& mod )
 { 
-    ptr_t RtlInsertInvertedFunctionTable = g_PatternLoader->data().RtlInsertInvertedFunctionTable64;
-    ptr_t LdrpInvertedFunctionTable = g_PatternLoader->data().LdrpInvertedFunctionTable64;
+    ptr_t RtlInsertInvertedFunctionTable = g_symbols.RtlInsertInvertedFunctionTable64;
+    ptr_t LdrpInvertedFunctionTable = g_symbols.LdrpInvertedFunctionTable64;
     if (mod.type == mt_mod32)
     {
-        RtlInsertInvertedFunctionTable = g_PatternLoader->data().RtlInsertInvertedFunctionTable32;
-        LdrpInvertedFunctionTable = g_PatternLoader->data().LdrpInvertedFunctionTable32;
+        RtlInsertInvertedFunctionTable = g_symbols.RtlInsertInvertedFunctionTable32;
+        LdrpInvertedFunctionTable = g_symbols.LdrpInvertedFunctionTable32;
     }
 
     // Invalid addresses. Probably pattern scan has failed
@@ -335,6 +335,41 @@ bool NtLdr::InsertInvertedFunctionTable( NtLdrEntry& mod )
         else
             return InsertP( _RTL_INVERTED_FUNCTION_TABLE7<DWORD>() );
     }
+}
+
+/// <summary>
+/// Free static TLS
+/// </summary>
+/// <param name="mod">Target module</param>
+/// <param name="noThread">Don't create new threads during remote call</param>
+/// <returns>Status code</returns>
+NTSTATUS NtLdr::UnloadTLS( const NtLdrEntry& mod, bool noThread /*= false*/ )
+{
+    // No loader entry to free
+    if (mod.ldrPtr == 0)
+        return STATUS_INVALID_ADDRESS;
+
+    ptr_t LdrpReleaseTlsEntry = g_symbols.LdrpReleaseTlsEntry64;
+    if (mod.type == mt_mod32)
+        LdrpReleaseTlsEntry = g_symbols.LdrpReleaseTlsEntry32;
+
+    // Not available
+    if (LdrpReleaseTlsEntry == 0)
+        return STATUS_ORDINAL_NOT_FOUND;
+
+    auto a = AsmFactory::GetAssembler( mod.type );
+    uint64_t result = 0;
+
+    a->GenPrologue();
+    a->GenCall( LdrpReleaseTlsEntry, { mod.ldrPtr, 0 }, IsWindows8Point1OrGreater() ? cc_fastcall : cc_stdcall );
+
+    _process.remote().AddReturnWithEvent( *a );
+    a->GenEpilogue();
+
+    _process.remote().CreateRPCEnvironment( noThread ? Worker_UseExisting : Worker_CreateNew, true );
+    _process.remote().ExecInWorkerThread( (*a)->make(), (*a)->getCodeSize(), result );
+
+    return STATUS_SUCCESS;
 }
 
 /// <summary>
@@ -609,7 +644,7 @@ void NtLdr::InsertTailList( ptr_t ListHead, ptr_t Entry )
 /// <summary>
 /// Hash image name
 /// </summary>
-/// <param name="str">Iamge name</param>
+/// <param name="str">Image name</param>
 /// <returns>Hash</returns>
 ULONG NtLdr::HashString( const std::wstring& str )
 {
@@ -619,7 +654,7 @@ ULONG NtLdr::HashString( const std::wstring& str )
     {
         UNICODE_STRING ustr;
         SAFE_CALL( RtlInitUnicodeString, &ustr, str.c_str() );
-        SAFE_NATIVE_CALL( RtlHashUnicodeString, &ustr, (BOOLEAN)TRUE, 0, &hash );
+        SAFE_NATIVE_CALL( RtlHashUnicodeString, &ustr, BOOLEAN(TRUE), 0, &hash );
     }
     else
     {
@@ -669,7 +704,7 @@ call_result_t<ptr_t> NtLdr::AllocateInHeap( eModType mt, size_t size )
         return mem->ptr();
     }
 
-    return STATUS_UNSUCCESSFUL;
+    return STATUS_ILLEGAL_FUNCTION;
 }
 
 /// <summary>
@@ -796,30 +831,11 @@ bool NtLdr::FindLdrpModuleIndexBase()
 template<typename T>
 bool NtLdr::FindLdrHeap()
 {
-    int32_t retries = 50;
-    _PEB_T<T> Peb = { 0 };
-
-    _process.core().peb<T>( &Peb );
-    for (; Peb.Ldr == 0 && retries > 0; retries--, Sleep( 10 ))
-        _process.core().peb<T>( &Peb );
-
-    if (Peb.Ldr)
+    _PEB_T<T> peb = { };
+    if (_process.core().peb<T>( &peb ) != 0)
     {
-        auto Ldr = _process.memory().Read<_PEB_LDR_DATA2_T<T>>( Peb.Ldr );
-        if (!Ldr)
-            return false;
-
-        for (; Ldr->InMemoryOrderModuleList.Flink == Ldr->InMemoryOrderModuleList.Blink && retries > 0; retries--, Sleep( 10 ))
-            Ldr = _process.memory().Read<_PEB_LDR_DATA2_T<T>>( Peb.Ldr );
-
-        MEMORY_BASIC_INFORMATION64 mbi = { 0 };
-        auto NtdllEntry = Ldr->InMemoryOrderModuleList.Flink;
-        if (NT_SUCCESS( _process.core().native()->VirtualQueryExT( NtdllEntry, &mbi ) ))
-        {
-            _LdrHeapBase = static_cast<T>(mbi.AllocationBase);
-            assert( _LdrHeapBase != _process.modules().GetModule( L"ntdll.dll" )->baseAddress );
-            return true;
-        }
+        _LdrHeapBase = peb.ProcessHeap;
+        return true;
     }
 
     return false;
@@ -829,8 +845,9 @@ bool NtLdr::FindLdrHeap()
 /// Unlink module from Ntdll loader
 /// </summary>
 /// <param name="mod">Module data</param>
+/// <param name="noThread">Don't create new threads during unlink</param>
 /// <returns>true on success</returns>
-bool NtLdr::Unlink( const ModuleData& mod )
+bool NtLdr::Unlink( const ModuleData& mod, bool noThread /*= false*/ )
 {
     ptr_t ldrEntry = 0;
     auto x64Image = mod.type == mt_mod64;
@@ -845,7 +862,7 @@ bool NtLdr::Unlink( const ModuleData& mod )
     // Unlink from graph
     // TODO: Unlink from _LdrpMappingInfoIndex. Still can't decide if it is required.
     if (IsWindows8OrGreater())
-        ldrEntry = CALL_64_86( x64Image, UnlinkTreeNode, mod, ldrEntry );
+        ldrEntry = CALL_64_86( x64Image, UnlinkTreeNode, mod, ldrEntry, noThread );
 
     return ldrEntry != 0;
 }
@@ -858,91 +875,51 @@ bool NtLdr::Unlink( const ModuleData& mod )
 template<typename T>
 ptr_t NtLdr::UnlinkFromLdr( const ModuleData& mod )
 {
-    _PEB_T<T> peb = { 0 };
-    _PEB_LDR_DATA2_T<T> ldr = { 0 };
+    auto ldrEntry = mod.ldrPtr;
+    if (ldrEntry == 0)
+        ldrEntry = FindLdrEntry<T>( mod.baseAddress );
 
-    auto native = _process.core().native();
-
-    if (native->getPEB( &peb ) != 0 && native->ReadProcessMemoryT( peb.Ldr, &ldr, sizeof(ldr), 0 ) == STATUS_SUCCESS)
+    // Unlink from module lists
+    if (ldrEntry != 0)
     {
-        ptr_t ldrEntry = 0;
-
-        // InLoadOrderModuleList
-        ldrEntry |= UnlinkListEntry(
-            ldr.InLoadOrderModuleList,
-            fieldPtr(peb.Ldr, &_PEB_LDR_DATA2_T<T>::InLoadOrderModuleList ),
-            offsetOf( &_LDR_DATA_TABLE_ENTRY_BASE_T<T>::InLoadOrderLinks ),
-            mod.baseAddress
-            );
-
-        // InMemoryOrderModuleList
-        ldrEntry |= UnlinkListEntry(
-            ldr.InMemoryOrderModuleList,
-            fieldPtr( peb.Ldr, &_PEB_LDR_DATA2_T<T>::InMemoryOrderModuleList ),
-            offsetOf( &_LDR_DATA_TABLE_ENTRY_BASE_T<T>::InMemoryOrderLinks ),
-            mod.baseAddress
-            );
-
-        // InInitializationOrderModuleList
-        ldrEntry |= UnlinkListEntry(
-            ldr.InInitializationOrderModuleList,
-            fieldPtr( peb.Ldr, &_PEB_LDR_DATA2_T<T>::InInitializationOrderModuleList ),
-            offsetOf( &_LDR_DATA_TABLE_ENTRY_BASE_T<T>::InInitializationOrderLinks ),
-            mod.baseAddress
-            );
-
-        // Hash table
-        if (ldrEntry == 0)
-        { 
-            //
-            // Search module in hash list
-            //
-            auto pHashList = _LdrpHashTable + sizeof( _LIST_ENTRY_T<T> )*(HashString( mod.name ) & 0x1F);
-            auto hashList = _process.memory().Read<_LIST_ENTRY_T<T>>( pHashList ).result( _LIST_ENTRY_T<T>() );
-
-            UnlinkListEntry( hashList, pHashList, offsetOf( &_LDR_DATA_TABLE_ENTRY_BASE_T<T>::HashLinks ), mod.baseAddress );
-        }
-        else
-            UnlinkListEntry<T>( fieldPtr( ldrEntry, &_LDR_DATA_TABLE_ENTRY_BASE_T<T>::HashLinks ) );
-
-        return ldrEntry;
+        UnlinkListEntry<T>( fieldPtr( ldrEntry, &_LDR_DATA_TABLE_ENTRY_BASE_T<T>::InLoadOrderLinks ) );
+        UnlinkListEntry<T>( fieldPtr( ldrEntry, &_LDR_DATA_TABLE_ENTRY_BASE_T<T>::InMemoryOrderLinks ) );
+        UnlinkListEntry<T>( fieldPtr( ldrEntry, &_LDR_DATA_TABLE_ENTRY_BASE_T<T>::InInitializationOrderLinks ) );
+        UnlinkListEntry<T>( fieldPtr( ldrEntry, &_LDR_DATA_TABLE_ENTRY_BASE_T<T>::HashLinks ) );
     }
 
-    return 0;
+    return ldrEntry;
 }
 
 /// <summary>
-/// Search and remove record from LIST_ENTRY structure
+/// Finds LDR entry for module
 /// </summary>
-/// <param name="pListEntry">List to remove from</param>
-/// <param name="head">List head address</param>
-/// <param name="ofst">Offset of link in _LDR_DATA_TABLE_ENTRY_BASE struct</param>
-/// <param name="baseAddress">Record to remove.</param>
-/// <returns>Address of removed record</returns>
+/// <param name="moduleBase">Target module base</param>
+/// <param name="found">Found entry</param>
+/// <returns>Found LDR entry address</returns>
 template<typename T>
-ptr_t NtLdr::UnlinkListEntry( _LIST_ENTRY_T<T> pListEntry, ptr_t head, uintptr_t ofst, ptr_t baseAddress )
+ptr_t NtLdr::FindLdrEntry( module_t moduleBase, _LDR_DATA_TABLE_ENTRY_BASE_T<T>* found /*= nullptr*/ )
 {
     auto native = _process.core().native();
+    _PEB_T<T> peb = { };
+    _PEB_LDR_DATA2_T<T> ldr = { };
+    _LDR_DATA_TABLE_ENTRY_BASE_T<T> localEntry = { };
+    if (found == nullptr)
+        found = &localEntry;
 
-    for (T entry = pListEntry.Flink; entry != 0 && entry != head; native->ReadProcessMemoryT( entry, &entry, sizeof( entry ) ))
+    if (native->getPEB( &peb ) != 0 && NT_SUCCESS( native->ReadProcessMemoryT( peb.Ldr, &ldr, sizeof( ldr ) ) ))
     {
-        _LDR_DATA_TABLE_ENTRY_BASE_T<T> modData = { { 0 } };
+        const auto ofst = offsetOf( &_LDR_DATA_TABLE_ENTRY_BASE_T<T>::InLoadOrderLinks );
+        const auto head = fieldPtr( peb.Ldr, &_PEB_LDR_DATA2_T<T>::InLoadOrderModuleList );
 
-        native->ReadProcessMemoryT( entry - ofst, &modData, sizeof(modData), 0 );
-
-        // Unlink if found
-        if (modData.DllBase == (T)baseAddress)
+        for (T entry = ldr.InLoadOrderModuleList.Flink;
+            entry != 0 && entry != head;
+            native->ReadProcessMemoryT( entry, &entry, sizeof( entry ) )
+            )
         {
-            T OldFlink = _process.memory().Read<T>( fieldPtr( entry, &_LIST_ENTRY_T<T>::Flink ) ).result( 0 );
-            T OldBlink = _process.memory().Read<T>( fieldPtr( entry, &_LIST_ENTRY_T<T>::Blink ) ).result( 0 );
-
-            // OldFlink->Blink = OldBlink;
-            _process.memory().Write( fieldPtr( OldFlink, &_LIST_ENTRY_T<T>::Blink ), OldBlink );
-
-            // OldBlink->Flink = OldFlink;
-            _process.memory().Write( fieldPtr( OldBlink, &_LIST_ENTRY_T<T>::Flink ), OldFlink );
-
-            return entry - ofst;
+            native->ReadProcessMemoryT( entry - ofst, found, sizeof( *found ) );
+            if (found->DllBase == static_cast<T>(moduleBase))
+                return entry - ofst;
         }
     }
 
@@ -975,9 +952,10 @@ void NtLdr::UnlinkListEntry( ptr_t pListLink )
 /// </summary>
 /// <param name="mod">Module data</param>
 /// <param name="ldrEntry">Module LDR entry</param>
+/// <param name="noThread">Don't create new threads during unlink</param>
 /// <returns>Address of removed record</returns>
 template<typename T>
-ptr_t NtLdr::UnlinkTreeNode( const ModuleData& mod, ptr_t ldrEntry )
+ptr_t NtLdr::UnlinkTreeNode( const ModuleData& mod, ptr_t ldrEntry, bool noThread /*= false*/ )
 {
     if (ldrEntry == 0)
         return ldrEntry;
@@ -990,7 +968,7 @@ ptr_t NtLdr::UnlinkTreeNode( const ModuleData& mod, ptr_t ldrEntry )
         return 0;
 
     a->GenPrologue();
-    a->GenCall( static_cast<uintptr_t>(RtlRbRemoveNode->procAddress),
+    a->GenCall( RtlRbRemoveNode->procAddress,
     {
         _LdrpModuleIndexBase,
         ldrEntry + offsetOf( &_LDR_DATA_TABLE_ENTRY_W8<T>::BaseAddressIndexNode )
@@ -999,7 +977,7 @@ ptr_t NtLdr::UnlinkTreeNode( const ModuleData& mod, ptr_t ldrEntry )
     _process.remote().AddReturnWithEvent( *a );
     a->GenEpilogue();
 
-    _process.remote().CreateRPCEnvironment( Worker_CreateNew, true );
+    _process.remote().CreateRPCEnvironment( noThread ? Worker_UseExisting : Worker_CreateNew, true );
     _process.remote().ExecInWorkerThread( (*a)->make(), (*a)->getCodeSize(), result );
 
     return ldrEntry;
